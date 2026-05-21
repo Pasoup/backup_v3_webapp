@@ -6,6 +6,7 @@
 
 import sys
 import os
+import json
 import base64
 import tempfile
 import uuid
@@ -20,14 +21,17 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
+
+import camera as cam_module
 
 # ── Add project root so pipeline imports work ─────────────────────────────────
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from config import BOX_CLASS_ID, QR_CLASS_ID, LOG_DIR
+from config import BOX_CLASS_ID, QR_CLASS_ID, LOG_DIR, L1_PAD_QR
 from utils.medicine_db import load_medicine_db, db_match, normalize_ocr, db_confidence_tier
+from utils.image import get_perspective
 from pipeline.layer1_detect import load_layer1_model, layer1_detect
 from pipeline.layer2_qr import layer2_read_qr
 from pipeline.layer3_ocr import layer3_read_label
@@ -35,6 +39,27 @@ from pipeline.layer4_vision import layer4_scan_full_frame, layer4_match_to_box, 
 from pipeline.consensus import consensus_check
 
 os.makedirs(LOG_DIR, exist_ok=True)
+
+# ── Calibration (written by image_taking/calibration.py) ──────────────────────
+_CALIB_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "..", "frontend", "src","utils", "calibration.json"
+)
+_CALIB_DEFAULTS = {"crop0_right": 0, "crop1_left": 0, "y_offset": 0, "x_offset": 0}
+
+def load_calibration() -> dict:
+    """Read calibration.json from disk each time — picks up edits without restart."""
+    if os.path.exists(_CALIB_PATH):
+        try:
+            with open(_CALIB_PATH) as _f:
+                return {**_CALIB_DEFAULTS, **json.load(_f)}
+        except Exception as e:
+            print(f"  Calibration: read error — {e}")
+    return _CALIB_DEFAULTS.copy()
+
+print(f"  Calibration path : {os.path.abspath(_CALIB_PATH)}")
+print(f"  Calibration file exists: {os.path.exists(_CALIB_PATH)}")
+print(f"  Calibration: {load_calibration()}")
 
 # ── App setup ─────────────────────────────────────────────────────────────────
 app = FastAPI(title="MedVerify API", version="2.0")
@@ -108,6 +133,7 @@ layer1_model = load_layer1_model()
 medicine_db  = load_medicine_db(yolo_class_names=LAYER4_CLASS_NAMES)
 
 print(f"  Medicine DB: {len(medicine_db)} entries loaded.")
+cam_module.start()
 print("  Ready.")
 
 # ── In-memory state (replace with a real DB in production) ───────────────────
@@ -144,33 +170,81 @@ def b64_to_frame(b64: str) -> np.ndarray:
     return frame
 
 
-def stitch_frames(frames: list) -> np.ndarray:
+@app.get("/calibration")
+def get_calibration():
+    """Return the current camera calibration values to the frontend."""
+    return load_calibration()
+
+
+@app.get("/video_feed")
+def video_feed():
+    """MJPEG stream of the live stitched camera feed."""
+    def generate():
+        while True:
+            frame = cam_module.get_jpeg()
+            if frame:
+                yield (
+                    b"--frame\r\n"
+                    b"Content-Type: image/jpeg\r\n\r\n"
+                    + frame +
+                    b"\r\n"
+                )
+            time.sleep(1 / 30)
+    return StreamingResponse(
+        generate(),
+        media_type="multipart/x-mixed-replace; boundary=frame",
+    )
+
+
+def stitch_frames(frames: list, calib: dict | None = None) -> tuple:
     """
-    Rotate each camera frame to match the display orientation, then stitch
-    side-by-side into a single wide image.
+    Rotate each camera frame to match the display orientation, apply
+    calibration offsets, then stitch side-by-side into a single wide image.
 
     Camera mounting orientation (matches CSS in CameraSection.jsx):
-      cam0 → rotate -90° (CCW)  — CSS: rotate(-90deg)
-      cam1 → rotate +90° (CW)   — CSS: rotate(90deg)
+      cam0 → rotate -90° (CCW)
+      cam1 → rotate +90° (CW)
 
-    Two 1920×1080 raw frames each become 1080×1920 after rotation,
-    producing a final 2160×1920 stitched frame that matches what the
-    pharmacist sees on screen.
+    Returns (stitched, f0, f1).
     """
-    if len(frames) == 1:
-        return frames[0]
+    c = calib or load_calibration()
+    c0r  = c.get("crop0_right", 0)
+    c1l  = c.get("crop1_left",  0)
+    yOff = c.get("y_offset",    0)
+    xOff = c.get("x_offset",    0)
 
-    # Rotate to match display orientation
+    if len(frames) == 1:
+        f0 = frames[0]
+        return f0, f0, None
+
     f0 = cv2.rotate(frames[0], cv2.ROTATE_90_COUNTERCLOCKWISE)
     f1 = cv2.rotate(frames[1], cv2.ROTATE_90_CLOCKWISE)
 
-    # Normalise heights in case they differ
-    h0 = f0.shape[0]
-    if f1.shape[0] != h0:
-        scale = h0 / f1.shape[0]
-        f1 = cv2.resize(f1, (int(f1.shape[1] * scale), h0))
+    # Seam crop
+    if c0r > 0: f0 = f0[:, :f0.shape[1] - c0r]
+    if c1l > 0: f1 = f1[:, c1l:]
 
-    return cv2.hconcat([f0, f1])
+    # Vertical alignment
+    if yOff > 0:
+        f1 = f1[yOff:, :]
+        f0 = f0[:f0.shape[0] - yOff, :]
+    elif yOff < 0:
+        y  = -yOff
+        f0 = f0[y:, :]
+        f1 = f1[:f1.shape[0] - y, :]
+
+    # Horizontal alignment
+    if xOff > 0:
+        pad = np.zeros((f1.shape[0], xOff, 3), dtype=np.uint8)
+        f1  = np.hstack([pad, f1])
+    elif xOff < 0:
+        f1  = f1[:, -xOff:]
+
+    # Match heights (trim to shorter)
+    h = min(f0.shape[0], f1.shape[0])
+    f0, f1 = f0[:h], f1[:h]
+
+    return cv2.hconcat([f0, f1]), f0, f1
 
 
 def best_ocr_label(ocr_texts: list, threshold: float = 85.0) -> str:
@@ -192,6 +266,52 @@ def frame_to_b64(frame: np.ndarray) -> str:
     """Encode a BGR numpy frame to base64 JPEG for sending back to the browser."""
     _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
     return "data:image/jpeg;base64," + base64.b64encode(buf).decode()
+
+
+def _get_qr_crop(det: dict,
+                 f0: "np.ndarray | None",
+                 f1: "np.ndarray | None") -> np.ndarray:
+    """
+    Re-extract a perspective-corrected QR crop from the individual camera frame.
+
+    Layer 1 already supplies a crop from the stitched frame (det["crop"]).
+    For QR reading we can do better: re-warp the *same* OBB points against the
+    single-camera frame that the QR actually came from, which is never scaled or
+    concatenated and therefore has no cross-camera seam artefacts.
+
+    Logic
+    -----
+    The stitched frame is [f0 | f1] side by side.
+    - bbox centre_x < f0.shape[1]  → QR is in cam0 (f0); pts are unchanged
+    - bbox centre_x ≥ f0.shape[1]  → QR is in cam1 (f1); subtract f0 width
+                                       from every x-coordinate in pts
+
+    Falls back to det["crop"] (stitched warp) if individual frames are
+    unavailable, OBB points are missing, or the re-warp raises an exception.
+    """
+    pts = det.get("pts")
+    if pts is None or f0 is None:
+        return det["crop"]
+
+    lx1, _, lx2, _ = det["bbox"]
+    cx       = (lx1 + lx2) / 2
+    f0_width = f0.shape[1]
+
+    try:
+        if cx < f0_width:
+            # QR lives in cam0's half — coordinates map directly to f0
+            print(f"  [L2] Re-cropping QR from cam0 frame (cx={cx:.0f} < f0_w={f0_width})")
+            return get_perspective(f0, pts, pad=L1_PAD_QR, qr_code=True)
+        elif f1 is not None:
+            # QR lives in cam1's half — shift x-coords into f1's space
+            pts_adj = pts.copy().astype("float32")
+            pts_adj[:, 0] -= f0_width
+            print(f"  [L2] Re-cropping QR from cam1 frame (cx={cx:.0f} ≥ f0_w={f0_width})")
+            return get_perspective(f1, pts_adj, pad=L1_PAD_QR, qr_code=True)
+    except Exception as exc:
+        print(f"  [L2] Individual-frame re-crop failed — falling back to stitched crop: {exc}")
+
+    return det["crop"]
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
@@ -237,22 +357,33 @@ def scan(req: ScanRequest):
     """
 
     t_start = time.time()
+    # Individual rotated frames — used by _get_qr_crop for Layer 2.
+    # Only populated when two frames arrive separately (frames_b64 path).
+    f0_rotated: np.ndarray | None = None
+    f1_rotated: np.ndarray | None = None
+
     try:
         if req.frame_b64:
-            # Already stitched by the frontend — use as-is
+            # Already stitched by the frontend — no individual frames available;
+            # Layer 2 will fall back to using the stitched-frame crop.
             stitched = b64_to_frame(req.frame_b64)
-            original_frames = [stitched]
 
         elif req.frames_b64:
             frames = [b64_to_frame(f) for f in req.frames_b64 if f]
             if len(frames) == 0:
                 raise HTTPException(status_code=400, detail="No valid frames provided")
-            # Stitch here — two 1920×1080 → one 3840×1080
-            stitched = stitch_frames(frames)
-            original_frames = frames   # kept only for L4 debug image logging
+            # stitch_frames returns (stitched, f0, f1) so Layer 2 can
+            # re-crop QR detections from the individual camera frames.
+            stitched, f0_rotated, f1_rotated = stitch_frames(frames)
 
         else:
-            raise HTTPException(status_code=400, detail="No frame provided")
+            # No frame from browser — capture directly from the backend cameras
+            raw = cam_module.get_raw_frames()
+            if raw is None:
+                raise HTTPException(status_code=503, detail="Camera not ready — no frames yet")
+            f0_raw, f1_raw = raw
+            frames = [f for f in [f0_raw, f1_raw] if f is not None]
+            stitched, f0_rotated, f1_rotated = stitch_frames(frames)
 
     except HTTPException:
         raise
@@ -288,7 +419,10 @@ def scan(req: ScanRequest):
     # ── Layers 2 & 3 — QR and OCR (sequential) ────────────────────────────────
     for d in contents:
         if d["cls"] == QR_CLASS_ID:
-            data_text    = layer2_read_qr(d["crop"]) or "[decode failed]"
+            # Re-crop from the individual camera frame for a cleaner QR crop;
+            # every other layer still operates on the full stitched frame.
+            qr_crop      = _get_qr_crop(d, f0_rotated, f1_rotated)
+            data_text    = layer2_read_qr(qr_crop) or "[decode failed]"
             layer3_score = 0.0
         else:
             result = layer3_read_label(d["crop"], medicine_db)
@@ -328,8 +462,18 @@ def scan(req: ScanRequest):
     def get_layer4():
         nonlocal layer4_detections
         if layer4_detections is None:
-            # Pass the stitched frame; original_frames kept for debug logging
-            layer4_detections = layer4_scan_full_frame(stitched)
+            # Scan each camera frame at full resolution instead of the stitched
+            # frame.  The stitched image (1664×1920+) gets downscaled to ~640px
+            # by YOLO's default imgsz, leaving each camera half at only ~320px —
+            # too small for reliable medicine identification.  Scanning the
+            # individual rotated frames (each 1080×1920) keeps full resolution
+            # and layer4_scan_full_frame offsets the bboxes back to stitched
+            # coordinates automatically.
+            individual = [f for f in [f0_rotated, f1_rotated] if f is not None]
+            layer4_detections = layer4_scan_full_frame(
+                stitched,
+                original_frames=individual if len(individual) > 1 else None,
+            )
         return layer4_detections
 
     # Build expected quantity map — handles both formats:
@@ -487,37 +631,18 @@ def scan(req: ScanRequest):
     out_path = os.path.join(LOG_DIR, f"scan_result_{ts}.jpg")
     cv2.imwrite(out_path, annotated)
 
-    # Save Layer 4 debug image
+    # Save Layer 4 debug image — always drawn on the stitched frame so bbox
+    # coordinates match exactly what the model saw.
     l4_out_path      = None
     l4_annotated_b64 = None
     if layer4_detections is not None:
         from pipeline.layer4_vision import layer4_draw_annotated
 
-        if len(original_frames) > 1:
-            # Save one debug image per camera — un-offset bbox back to camera-local coords
-            cam0_w = original_frames[0].shape[1]
-            for cam_idx, cam_frame in enumerate(original_frames):
-                x_off = cam_idx * cam0_w
-                cam_dets = []
-                for d in layer4_detections:
-                    x1, y1, x2, y2 = d["bbox"]
-                    cx = (x1 + x2) / 2
-                    if x_off <= cx < (x_off + cam_frame.shape[1]):
-                        cam_dets.append({**d, "bbox": (x1 - x_off, y1, x2 - x_off, y2)})
-
-                l4_img      = layer4_draw_annotated(cam_frame, cam_dets)
-                cam_path    = os.path.join(LOG_DIR, f"scan_layer4_{ts}_cam{cam_idx}.jpg")
-                cv2.imwrite(cam_path, l4_img)
-                print(f"[Scan] Saved L4 debug cam{cam_idx} → {cam_path}")
-                if cam_idx == 0:
-                    l4_out_path      = cam_path
-                    l4_annotated_b64 = frame_to_b64(l4_img)
-        else:
-            l4_img       = layer4_draw_annotated(original_frames[0], layer4_detections)
-            l4_out_path  = os.path.join(LOG_DIR, f"scan_layer4_{ts}.jpg")
-            cv2.imwrite(l4_out_path, l4_img)
-            l4_annotated_b64 = frame_to_b64(l4_img)
-            print(f"[Scan] Saved L4 debug image → {l4_out_path}")
+        l4_img           = layer4_draw_annotated(stitched, layer4_detections)
+        l4_out_path      = os.path.join(LOG_DIR, f"scan_layer4_{ts}.jpg")
+        cv2.imwrite(l4_out_path, l4_img)
+        l4_annotated_b64 = frame_to_b64(l4_img)
+        print(f"[Scan] Saved L4 debug (stitched) → {l4_out_path}")
 
     # Add to scan history
     history_entry = {

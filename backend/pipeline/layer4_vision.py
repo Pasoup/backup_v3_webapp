@@ -32,45 +32,90 @@ def set_medicine_db(db: list) -> None:
 
 # ── Full-frame scan ───────────────────────────────────────────────────────────
 
+def _iou(a: tuple, b: tuple) -> float:
+    """Intersection-over-union for two (x1, y1, x2, y2) boxes."""
+    ax1, ay1, ax2, ay2 = a
+    bx1, by1, bx2, by2 = b
+    ix1 = max(ax1, bx1);  iy1 = max(ay1, by1)
+    ix2 = min(ax2, bx2);  iy2 = min(ay2, by2)
+    inter = max(0, ix2 - ix1) * max(0, iy2 - iy1)
+    if inter == 0:
+        return 0.0
+    return inter / ((ax2-ax1)*(ay2-ay1) + (bx2-bx1)*(by2-by1) - inter)
+
+
+def _deduplicate(detections: list, iou_thresh: float = 0.3) -> list:
+    """
+    Remove duplicate detections caused by the same medicine appearing in both
+    the per-camera scan and the stitched scan.
+
+    Processes detections highest-confidence first, so the per-camera result
+    (higher res → higher conf) always beats the stitched duplicate.
+    """
+    kept = []
+    for d in sorted(detections, key=lambda x: x["conf"], reverse=True):
+        if not any(_iou(d["bbox"], k["bbox"]) > iou_thresh for k in kept):
+            kept.append(d)
+    return kept
+
+
 def layer4_scan_full_frame(frame: np.ndarray, original_frames: list = None) -> list:
     """
-    Run med_box.pt on the full frame.
+    Run med_box.pt on the frame(s) and return detections in stitched coordinates.
 
-    If original_frames is provided (list of individual camera frames before
-    stitching), each frame is scanned separately at full resolution and the
-    bounding boxes are offset to match their position in the stitched frame.
-    This preserves the model's original resolution and avoids the confidence
-    drop caused by downscaling a wide stitched image.
+    Strategy (two-pass when individual camera frames are available):
+      Pass 1 — scan each camera frame at its native resolution (1080×1920).
+               Gives the model the full resolution it was trained on.
+               Bboxes are offset back to stitched-frame coordinates.
 
-    Falls back to scanning the stitched frame directly if original_frames
-    is not provided.
+      Pass 2 — scan the stitched frame as well.
+               Catches any medicine box that straddles the camera seam and
+               was therefore split between the two individual frames.
+
+    Duplicate detections (same box seen in both passes) are removed by IoU;
+    the per-camera result wins because it has higher confidence.
+
+    Falls back to stitched-only if individual frames are not provided.
     """
     if frame is None or frame.size == 0:
         return []
 
     if original_frames and len(original_frames) > 1:
-        # Scan each camera frame individually at full resolution
         all_detections = []
         x_offset = 0
 
+        # ── Pass 1: per-camera full-resolution scan ───────────────────────────
         for cam_frame in original_frames:
             if cam_frame is None or cam_frame.size == 0:
                 continue
 
             dets = _scan_single_frame(cam_frame)
 
-            # Offset bounding boxes by this camera's x position in the stitched image
+            # Shift bboxes to stitched-frame coordinates
             for d in dets:
                 x1, y1, x2, y2 = d["bbox"]
                 d["bbox"] = (x1 + x_offset, y1, x2 + x_offset, y2)
+                d["source"] = "per_camera"
             all_detections.extend(dets)
 
-            x_offset += cam_frame.shape[1]   # next camera starts after this one
+            x_offset += cam_frame.shape[1]
 
-        print(f"  [L4] Per-frame scan: {len(all_detections)} detection(s) across {len(original_frames)} cameras")
+        # ── Pass 2: stitched scan — catches seam-straddling boxes ─────────────
+        seam_dets = _scan_single_frame(frame)
+        for d in seam_dets:
+            d["source"] = "stitched"
+        all_detections.extend(seam_dets)
+
+        # Remove duplicates — per-camera results ranked higher (sorted by conf)
+        all_detections = _deduplicate(all_detections)
+
+        per_cam = sum(1 for d in all_detections if d.get("source") == "per_camera")
+        seam    = sum(1 for d in all_detections if d.get("source") == "stitched")
+        print(f"  [L4] {len(all_detections)} detection(s) — "
+              f"{per_cam} per-camera, {seam} seam")
         return sorted(all_detections, key=lambda d: d["conf"], reverse=True)
 
-    # Fallback — scan stitched frame directly
+    # Single-camera or no individual frames — scan stitched directly
     return _scan_single_frame(frame)
 
 
@@ -108,45 +153,50 @@ def _scan_single_frame(frame: np.ndarray) -> list:
 
 def layer4_match_to_box(layer4_detections: list, box_bbox: tuple):
     """
-    Find the highest-confidence Layer-4 detection whose centre falls inside
-    *box_bbox* (from Layer 1).
+    Find the highest-confidence Layer 4 detection whose centre point falls
+    inside the Layer 1 bounding box, then return its name and confidence.
 
-    Applies L4_CONF_MIN threshold — detections below it are ignored.
+    Parameters
+    ----------
+    layer4_detections : output of layer4_scan_full_frame() — list of dicts
+                        with keys "name", "conf", "bbox"
+    box_bbox          : (x1, y1, x2, y2) of the Layer 1 medicine box
 
     Returns
     -------
-    (name: str, conf: float)
-        name is "UNKNOWN" and conf is 0.0 if nothing qualifies.
+    (name, conf)      — best match above L4_CONF_MIN threshold
+    ("UNKNOWN", 0.0)  — if nothing landed inside the box
     """
     bx1, by1, bx2, by2 = box_bbox
     best_name = "UNKNOWN"
     best_conf = 0.0
 
     for d in layer4_detections:
+        # Skip anything below the minimum confidence threshold
         if d["conf"] < L4_CONF_MIN:
             continue
+
+        # Use the detection's centre point as its representative location
         dx1, dy1, dx2, dy2 = d["bbox"]
         cx = (dx1 + dx2) / 2
         cy = (dy1 + dy2) / 2
+
+        # Check whether this centre falls inside the Layer 1 box
         if bx1 <= cx <= bx2 and by1 <= cy <= by2:
             if d["conf"] > best_conf:
                 best_name = d["name"]
                 best_conf = d["conf"]
 
-    if best_conf < L4_CONF_MIN:
-        print(f"    [L4] conf too low ({best_conf:.2f}) → UNKNOWN")
+    if best_name == "UNKNOWN":
+        print(f"    [L4] No detection centre landed inside box → UNKNOWN")
         return "UNKNOWN", 0.0
 
+    print(f"    [L4] Matched '{best_name}'  conf={best_conf:.2f}")
     return best_name, best_conf
 
 
 def layer4_draw_annotated(frame: np.ndarray, detections: list) -> np.ndarray:
-    """
-    Draw all Layer 4 detections onto a copy of *frame* and return it.
-    Shows every detection the model saw — including ones below L4_CONF_MIN —
-    so you can see exactly what med_box.pt found before the threshold filter.
-    Each box is labelled with the medicine name and confidence score.
-    """
+
     import cv2
     out = frame.copy()
 
@@ -155,7 +205,7 @@ def layer4_draw_annotated(frame: np.ndarray, detections: list) -> np.ndarray:
         conf  = d["conf"]
         name  = d["name"]
 
-        # Colour by confidence: green >= L4_CONF_MIN, amber >= 0.4, red below
+    
         if conf >= L4_CONF_MIN:
             color = (0, 200, 80)   
         elif conf >= 0.40:

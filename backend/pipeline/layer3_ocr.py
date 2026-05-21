@@ -96,8 +96,15 @@ def ocr_db_score(results: list, medicine_db: list) -> tuple[float, list[str]]:
     if best_db_score > 0.0:
         return best_db_score, texts
 
-    # Nothing matched DB — fallback so we still pick the least-bad variant
-    fallback = sum(_to_float(c) for _, _, c in results if _to_float(c) > OCR_CONF_KEEP) * 0.1
+    # Nothing matched DB — fallback so we still pick the least-bad OCR variant.
+    # Capped at 5.0 so it can NEVER exceed DB_LOW_THRESHOLD (88) and accidentally
+    # cause server.py to treat a non-DB-match as high-confidence OCR, which would
+    # skip Layer 4 for boxes where OCR reads many tokens with high EasyOCR
+    # confidence but none of them are medicine names.
+    fallback = min(
+        sum(_to_float(c) for _, _, c in results if _to_float(c) > OCR_CONF_KEEP) * 0.1,
+        5.0,
+    )
     return fallback, texts
 
 
@@ -143,13 +150,13 @@ def best_score_for(candidate: np.ndarray, medicine_db: list) -> tuple[float, lis
 
 # ── Orientation correction ────────────────────────────────────────────────────
 
-def correct_orientation(crop: np.ndarray, medicine_db: list) -> tuple[np.ndarray, list[str]]:
+def correct_orientation(crop: np.ndarray, medicine_db: list) -> tuple[np.ndarray, float, list[str]]:
     """
     Try 0° and 180° rotations, pick the one with the better DB match score.
     Upscales the crop if it is too small for reliable OCR.
 
-    Returns (best_crop, best_texts) — winning crop and its texts so the caller
-    doesn't need to re-run OCR.
+    Returns (best_crop, best_score, best_texts) — winning crop, its DB score,
+    and its texts so the caller doesn't need to re-run OCR.
     """
     h, w = crop.shape[:2]
 
@@ -192,7 +199,7 @@ def correct_orientation(crop: np.ndarray, medicine_db: list) -> tuple[np.ndarray
         if best_score >= 92.0: 
             break
 
-    return best_crop, best_texts
+    return best_crop, best_score, best_texts
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -216,7 +223,7 @@ def layer3_read_label(crop: np.ndarray, medicine_db: list) -> tuple[list, float]
                        [0, -1, 0]])
     crop = cv2.filter2D(crop, -1, kernel)
 
-    best_score, texts = correct_orientation(crop, medicine_db)
+    best_crop, best_score, texts = correct_orientation(crop, medicine_db)
     if not texts:
         return None
 

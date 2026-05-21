@@ -23,7 +23,7 @@ QR_CLASS_ID      = 2
 L1_CONF_RUN      = 0.30   # minimum conf to even run inference
 L1_CONF_QR       = 0.50   # minimum conf to keep a QR detection
 L1_CONF_OTHER    = 0.4   # minimum conf to keep a box / label detection
-L1_PAD_QR        = 40     # perspective-warp padding (px) for QR crops
+L1_PAD_QR        = 20    # perspective-warp padding (px) for QR crops
 L1_PAD_OTHER     = 10     # perspective-warp padding (px) for other crops
 
 # ── Layer 3 — OCR ─────────────────────────────────────────────────────────────

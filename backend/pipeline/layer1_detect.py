@@ -93,6 +93,7 @@ def layer1_detect(frame: np.ndarray, model: YOLO, medicine_db: list):
                 "bbox":  bbox,
                 "crop":  crop,
                 "conf":  score,
+                "pts":   pts.copy(),  # raw OBB corners in stitched-frame coords
             })
  
     annotated = results[0].plot() if results else frame
