@@ -65,7 +65,8 @@ def _open_master(index: int, width: int, height: int):
 
     
     cap.set(cv2.CAP_PROP_EXPOSURE, -5)
-    
+    cap.set(cv2.CAP_PROP_AUTOFOCUS, 0)   # lock focus — prevent mid-scan refocusing
+
     ae_actual = cap.get(cv2.CAP_PROP_AUTO_EXPOSURE)
     ex_actual = cap.get(cv2.CAP_PROP_EXPOSURE)
 
@@ -97,7 +98,8 @@ def _open_slave(index: int, width: int, height: int, master_vals: dict):
 
 
     cap.set(cv2.CAP_PROP_EXPOSURE, -5)
-    
+    cap.set(cv2.CAP_PROP_AUTOFOCUS, 0)   # lock focus — prevent mid-scan refocusing
+
     actual_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     actual_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
@@ -173,8 +175,7 @@ def _camera_loop():
                 if _f0_beta != 0:
                     f0 = cv2.convertScaleAbs(f0, alpha=1.0, beta=_f0_beta)
                 stitched = _stitch(f0, f1, calib)
-                # Downscale to 50% for the live stream — keeps encoding fast
-                # without affecting scan quality (raw frames kept at full res)
+                
                 display  = cv2.resize(stitched, (0, 0), fx=0.5, fy=0.5,
                                       interpolation=cv2.INTER_AREA)
                 _, jpeg   = cv2.imencode(".jpg", display,

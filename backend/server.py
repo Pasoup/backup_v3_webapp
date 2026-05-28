@@ -39,6 +39,7 @@ from pipeline.layer3_ocr import layer3_read_label
 from pipeline.layer4_vision import layer4_scan_full_frame, layer4_match_to_box, LAYER4_CLASS_NAMES
 from pipeline.consensus import consensus_check
 
+
 os.makedirs(LOG_DIR, exist_ok=True)
 
 # ── Calibration (written by image_taking/calibration.py) ──────────────────────
@@ -404,18 +405,77 @@ def get_drug_database():
         raise HTTPException(status_code=500, detail=f"Could not read medicine_db.csv: {e}")
     return {"drugs": drugs, "total": len(drugs)}
 
-@app.get("drug-edit_database")
-def edit_drug_database(item):
-    pass
+class DrugCreate(BaseModel):
+    name: str
+
+class DrugUpdate(BaseModel):
+    name: str
+
+_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "medicine_db.csv")
+
+def _read_drug_names() -> list[str]:
+    """Return all non-empty drug names from medicine_db.csv."""
+    names = []
+    try:
+        with open(_DB_PATH, newline="", encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                n = row.get("name", "").strip()
+                if n:
+                    names.append(n)
+    except FileNotFoundError:
+        pass
+    return names
+
+def _write_drug_names(names: list[str]) -> None:
+    """Overwrite medicine_db.csv with the given list of names."""
+    with open(_DB_PATH, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=["name"])
+        writer.writeheader()
+        for n in names:
+            writer.writerow({"name": n})
+
+def _names_to_response(names: list[str]) -> dict:
+    return {"drugs": [{"id": i + 1, "name": n} for i, n in enumerate(names)],
+            "total": len(names)}
 
 
-@app.get("drug-remove")
-def remove_drug_database(item):
-    pass
+@app.post("/drug-database")
+def add_drug(payload: DrugCreate):
+    """Append a new drug name to medicine_db.csv."""
+    name = payload.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Drug name cannot be empty")
+    names = _read_drug_names()
+    if name.upper() in [n.upper() for n in names]:
+        raise HTTPException(status_code=400, detail=f"'{name}' already exists in the database")
+    names.append(name)
+    _write_drug_names(names)
+    return _names_to_response(names)
 
-@app.get("drug-add")
-def add_drug_database(item):
-    pass
+
+@app.put("/drug-database/{drug_id}")
+def update_drug(drug_id: int, payload: DrugUpdate):
+    """Edit the name of an existing drug by its 1-based row ID."""
+    name = payload.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Drug name cannot be empty")
+    names = _read_drug_names()
+    if drug_id < 1 or drug_id > len(names):
+        raise HTTPException(status_code=404, detail=f"Drug ID {drug_id} not found")
+    names[drug_id - 1] = name
+    _write_drug_names(names)
+    return _names_to_response(names)
+
+
+@app.delete("/drug-database/{drug_id}")
+def delete_drug(drug_id: int):
+    """Remove a drug from medicine_db.csv by its 1-based row ID."""
+    names = _read_drug_names()
+    if drug_id < 1 or drug_id > len(names):
+        raise HTTPException(status_code=404, detail=f"Drug ID {drug_id} not found")
+    removed = names.pop(drug_id - 1)
+    _write_drug_names(names)
+    return {"removed": removed, **_names_to_response(names)}
 
 
 # ── /scan ─────────────────────────────────────────────────────────────────────

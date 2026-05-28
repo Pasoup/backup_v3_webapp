@@ -9,7 +9,7 @@ export default function HowToUse() {
         </svg>
       </div>
       <div>
-        <h3 className="text-sm font-semibold text-slate-800 mb-1">How to use MedVerify</h3>
+        <h3 className="text-sm font-semibold text-slate-800 mb-1">How to use MedCheckPro</h3>
         <p className="text-sm text-slate-500 leading-relaxed">
           Enter the expected medicine name and click <strong>Load Data</strong>, or import a{" "}
           <strong>.txt file</strong> with one medicine per line. Position your medicine boxes within

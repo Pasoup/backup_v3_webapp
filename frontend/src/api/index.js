@@ -51,3 +51,59 @@ export async function getHistory() {
   const res = await fetch(`${BASE}/scan/history`);
   return res.json();
 }
+
+export async function getDrugDatabase() {
+  const res = await fetch(`${BASE}/drug-database`);
+  if (!res.ok) throw new Error(`Failed to load drug database: ${res.status}`);
+  return res.json(); // { drugs: [{id, name}, ...], total: N }
+}
+
+export async function saveCalibration(fields) {
+  // fields: { cam_width, cam_height, crop0_right, crop1_left, y_offset, x_offset }
+  // Only pass fields you want to update — the rest are kept as-is on the backend.
+  const res = await fetch(`${BASE}/calibration`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(fields),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || `Failed to save calibration: ${res.status}`);
+  }
+  return res.json(); // { calibration: {...}, restarted: true }
+}
+
+export async function addDrug(name) {
+  const res = await fetch(`${BASE}/drug-database`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || `Failed to add drug: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function updateDrug(id, name) {
+  const res = await fetch(`${BASE}/drug-database/${id}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || `Failed to update drug: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function deleteDrug(id) {
+  const res = await fetch(`${BASE}/drug-database/${id}`, { method: "DELETE" });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || `Failed to delete drug: ${res.status}`);
+  }
+  return res.json();
+}

@@ -13,8 +13,8 @@ function formatDate(iso) {
 
 const STATUS_CONFIG = {
   MATCHED:        { label: "Matched",      bg: "bg-green-50",  text: "text-green-700",  badge: "bg-green-100 text-green-700",   dot: "bg-green-500"  },
-  MISSING:        { label: "Missing",      bg: "bg-red-50",    text: "text-red-700",    badge: "bg-red-100   text-red-700",     dot: "bg-red-500"    },
-  EXTRA:          { label: "Extra",        bg: "bg-amber-50",  text: "text-amber-700",  badge: "bg-amber-100 text-amber-700",   dot: "bg-amber-400"  },
+  MISSING:        { label: "Missing",      bg: "bg-red-50",  text: "text-red-700",  badge: "bg-amber-100 text-red-700",   dot: "bg-red-400"  },
+  EXTRA:          { label: "Extra",        bg: "bg-amber-50",    text: "text-amber-700",    badge: "bg-amber-100   text-amber-700",     dot: "bg-amber-500"    },
   PENDING_REVIEW: { label: "Needs Review", bg: "bg-yellow-50", text: "text-yellow-700", badge: "bg-yellow-100 text-yellow-700", dot: "bg-yellow-400" },
   UNKNOWN:        { label: "Unknown",      bg: "bg-orange-50", text: "text-orange-700", badge: "bg-orange-100 text-orange-700", dot: "bg-orange-400" },
 };
@@ -22,9 +22,6 @@ const STATUS_CONFIG = {
 function ResultRow({ r }) {
   const cfg = STATUS_CONFIG[r.scan_status] || STATUS_CONFIG.UNKNOWN;
   const imgSrc = r.reference_image ? `${API}${r.reference_image}` : null;
-  console.log("HEREEEE")
-  console.log(imgSrc)
-
   return (
     <div className={`rounded-xl px-4 py-3 ${cfg.bg}`}>
       {/* Top row: dot + name + badge */}
@@ -47,7 +44,7 @@ function ResultRow({ r }) {
 
           {/* Missing label with quantity info */}
           {r.scan_status === "MISSING" && (
-            <p className="text-xs text-red-400 mt-0.5">
+            <p className="text-xs text-amber-500 mt-0.5">
               {r.qty_expected
                 ? `❌ Expected ${r.qty_expected}× — only ${r.qty_found} found`
                 : "❌ Not detected in scan"}
@@ -66,13 +63,13 @@ function ResultRow({ r }) {
       {/* Reference image — only shown for MISSING with an image */}
       {r.scan_status === "MISSING" && imgSrc && (
         <div className="mt-3 ml-5">
-          <p className="text-[10px] font-semibold text-red-400 uppercase tracking-widest mb-1.5">
+          <p className="text-[10px] font-semibold text-amber-500 uppercase tracking-widest mb-1.5">
             Reference — what this medicine looks like
           </p>
           <img
             src={imgSrc}
             alt={`Reference image for ${r.final_name}`}
-            className="h-24 w-auto rounded-lg border border-red-200 object-contain bg-white shadow-sm"
+            className="h-24 w-auto rounded-lg border border-amber-200 object-contain bg-white shadow-sm"
             onError={(e) => { e.currentTarget.style.display = "none"; }}
           />
         </div>
@@ -80,7 +77,7 @@ function ResultRow({ r }) {
 
       {/* No image fallback */}
       {r.scan_status === "MISSING" && !imgSrc && (
-        <div className="mt-3 ml-5 flex items-center gap-2 text-xs text-red-300 italic">
+        <div className="mt-3 ml-5 flex items-center gap-2 text-xs text-amber-400 italic">
           <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5}
               d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
@@ -151,8 +148,8 @@ export default function HistoryDetailPopup({ item, onClose }) {
         <div className="grid grid-cols-4 gap-2 px-6 py-4 border-b border-slate-100">
           {[
             { label: "Matched", val: item.matched,          numCls: "text-green-600",  bgCls: "bg-green-50"  },
-            { label: "Missing", val: item.missing,          numCls: "text-red-500",    bgCls: "bg-red-50"    },
-            { label: "Extra",   val: item.extra,            numCls: "text-amber-600",  bgCls: "bg-amber-50"  },
+            { label: "Missing", val: item.missing,          numCls: "text-red-600",  bgCls: "bg-red-50"  },
+            { label: "Extra",   val: item.extra,            numCls: "text-amber-500",    bgCls: "bg-amber-50"    },
             { label: "Unknown", val: item.unknown || unknown.length, numCls: "text-orange-600", bgCls: "bg-orange-50" },
           ].map(({ label, val, numCls, bgCls }) => (
             <div key={label} className={`rounded-xl py-3 text-center ${bgCls}`}>
@@ -181,8 +178,8 @@ export default function HistoryDetailPopup({ item, onClose }) {
 
           {missing.length > 0 && (
             <section>
-              <p className="text-xs font-bold text-red-500 uppercase tracking-widest mb-2 flex items-center gap-1.5">
-                <span className="w-2 h-2 rounded-full bg-red-500 inline-block" />
+              <p className="text-xs font-bold text-red-600 uppercase tracking-widest mb-2 flex items-center gap-1.5">
+                <span className="w-2 h-2 rounded-full bg-red-400 inline-block" />
                 Missing ({missing.length})
               </p>
               <div className="space-y-3">
@@ -205,8 +202,8 @@ export default function HistoryDetailPopup({ item, onClose }) {
 
           {extra.length > 0 && (
             <section>
-              <p className="text-xs font-bold text-amber-600 uppercase tracking-widest mb-2 flex items-center gap-1.5">
-                <span className="w-2 h-2 rounded-full bg-amber-400 inline-block" />
+              <p className="text-xs font-bold text-amber-500 uppercase tracking-widest mb-2 flex items-center gap-1.5">
+                <span className="w-2 h-2 rounded-full bg-amber-500 inline-block" />
                 Unexpected ({extra.length})
               </p>
               <div className="space-y-2">
